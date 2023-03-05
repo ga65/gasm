@@ -1,0 +1,248 @@
+# Langton's and for Gigatrom TTL Computer
+# Geert Awater - Feb 2023
+# Revisions
+# v1: first working two-state example, crashes the computer when going off screen
+# v2: adding wraparound at screen edges              
+# v3: adding multipler states, colors 0,1,2...n-1
+# s4: adding arbitrary colors, k, k+m k+2m ...k_(n-1)*m   - 172 bytes
+# s5: adding arbitrary left-tight LUT (up to 16 states) - doe s not quite work but i don't want to spend too much time on it and goto v6
+# s6: change colors dynamically instead of compile time
+# s7: change direction vector randomly 
+# s8: change n_states dynamically. Randomly maybe? Random colors? Shuffle palette?
+
+%include include/gigatron.i
+%include include/brkpnt.i 
+
+# variable locations
+
+address    EQU 0x30
+xcount     EQU 0x32
+ycount     EQU 0x33
+xx         EQU address    ; overlaps with LWS of VRAM address
+yy         EQU address+1  ; MS word
+ptr        EQU 0x34       
+state      EQU 0x36       
+prev_st    EQU 0x38       
+init_st    EQU 0x3A       
+
+# system constants
+ymin       EQU giga_vram/256
+ymax       EQU ymin+giga_yres-1
+xmin       EQU 0
+xmax       EQU xmin+giga_xres-1
+
+# ant DNA
+
+max_n_st   EQU 64         ; number of colors  
+s_incr     EQU 19         ; color step
+
+east       EQU 0x00
+north      EQU 0x40
+west       EQU 0x80
+south      EQU 0xc0
+
+left       EQU 0x40 ; add 1 mod 4  to turn left
+right      EQU 0xc0 ; add 3 mod 4 (= -1 mod4)  to turn left
+straight   EQU 0x00 ; no turn
+reverse    EQU 0x80 ; back up
+
+red        EQU 0x01
+green      EQU 0x04
+blue       EQU 0x10
+white      EQU 0x3f
+yellow     EQU red+green
+turqoise   EQU green+blu
+purple     EQU red+blu
+
+
+_callTable_     EQU     0x007E     ; call addresses are automatically stored here by the assembler
+
+_startAddress_  EQU    0x0200      ; entry point for the code, if this is missing defaults to 0x0200
+initial    EQU   0x200 
+main       EQU   0x300 
+state_lut  EQU   0x400 
+n_states   EQU   5          ; number of colors  
+dna        EQU   state_lut+max_n_st
+state_lut  DB    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+           DB    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+           DB    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+           DB    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+dna        DB    1 62 61 60 59 58 57 56 55 54 53 52 51 50 49 48
+%dna        DB    left+red*2 right+blue*2 right+(green+red)*2 right+(green+blue)*2
+init_dir   EQU   east
+
+
+
+# initialize: clear screen and set up LUTs
+
+initial   LDI   ymin
+           ST    yy
+
+           LDWI  dna   ; get first dna
+           PEEK
+           ANDI  white        ; extract color 
+           ST    init_st
+
+           LDI   ymax+1-ymin  
+yloop      ST    ycount         
+
+           LDI   xmin   ; start to the left 
+           ST    xx 
+
+           LDI   xmax+1-xmin
+xloop      ST    xcount  
+
+           LD    init_st       
+
+           POKE  address
+
+           INC   xx 
+           LD    xcount  
+           SUBI  1
+           BNE   xloop
+
+           INC   yy     ; one line down 
+
+           LD    ycount   
+           SUBI  1
+           BNE   yloop
+
+           # fill LUT based on state_lut
+           # for ptr = 0 to n_states = 1
+           LDI   0
+           STW   ptr
+
+           #     state = dna(ptr)
+for_loop   LDWI  dna      
+           ADDW  ptr      
+           PEEK
+           ST    state
+
+           #     if ptr == 0
+           LD    ptr     ; LSB only is enough
+           BNE   else  
+
+           #         init_st = state
+           LD    state
+           ST    init_st      
+           BRA   endif
+
+           #     else
+           #         state_lut(prev_st) = state
+else       LDWI  state_lut
+           ADDW  prev_st
+           STW   address
+
+           LD    giga_rand1
+           ANDI  1
+           BNE   r_turn1  ; depending on first bit  
+           LDI   left     ; go left
+           BRA   merge1
+r_turn1    LDI   right    ; or right
+merge1     ORW   state
+           POKE  address
+
+           #     endif
+           #     prev_st = state
+endif      LD    state
+           ANDI  white  ; chop off direction information
+           STW   prev_st      
+           LDWI  SYS_Random_34
+           STW   giga_sysFn
+           SYS   34
+
+           # endfor
+           INC   ptr
+           LDI   n_states
+           SUBW  ptr
+           BNE   for_loop
+
+           # state_lut(prev_st) = init_st
+           LDWI  state_lut
+           ADDW  prev_st
+           STW   address
+
+           LD    giga_rand1
+           ANDI  1
+           BNE   r_turn2  ; depending on first bit  
+           LDI   left     ; go left
+           BRA   merge2
+r_turn2    LDI   right    ; or right
+merge2     ORW   init_st
+
+           POKE  address
+
+           CALL main      ; jump to next page
+
+# start of main program
+
+           ; initalize direction 
+main       LDI   init_dir 
+           ST    ptr         
+
+           ; initalize position 
+           LDI   (ymax+1-ymin)/2
+           ST    yy          
+           LDI   (xmax+1-xmin)/2
+           ST    xx          
+
+#
+loop       LDW   address
+           PEEK                   ; now vAC contains state of current pixel
+          ; look up next state and direction
+           STW   state  ; TBD can be LD?
+           LDWI  state_lut
+           ADDW  state
+           PEEK  ; get next state and direction 
+           ST    init_st ; temp storage
+           ANDI  white 
+           POKE  address
+           LD    init_st
+           ANDI  0xc0 
+           ADDW  ptr   ; turn pointer
+           ST    ptr   
+
+# on ptr goto p0,p1,p2,p3 
+
+           LD    ptr   
+           BEQ   p0
+           SUBI  0x40
+           BEQ   p1
+           SUBI  0x40
+           BEQ   p2
+
+           ; ptr =0xc0 , fall thru
+
+p3         LD    yy               ; yy = yy + 1
+           SUBI  ymax
+           BEQ   p3_wrap
+           ADDI  ymax+1
+           ST    yy
+           BRA   loop
+p3_wrap    LDI   ymin   
+           ST    yy               
+           BRA   loop
+
+p2         LD    xx               ; xx = xx - 1
+           BNE   p2_nowrap
+           LDI   xmax+1
+p2_nowrap  SUBI  1
+           ST    xx
+           BRA   loop
+
+p1         LD    yy               ; yy = yy - 1
+           SUBI  ymin
+           BNE   p1_nowrap
+           LDI   ymax
+           ST    yy
+           BRA   loop
+p1_nowrap  ADDI  ymin-1  
+           ST    yy
+           BRA   loop
+
+p0         LD    xx               ; xx = xx + 1
+           SUBI  xmax
+           BEQ   p0_wrap
+           ADDI  xmax+1 
+p0_wrap    ST    xx
+           BRA   loop
